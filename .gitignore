@@ -18,7 +18,7 @@ littleproxy_keystore.jks
 littleproxy_cert
 lib/
 log.txt
-/bin
+*/bin/
 .project
 .classpath
 .settings

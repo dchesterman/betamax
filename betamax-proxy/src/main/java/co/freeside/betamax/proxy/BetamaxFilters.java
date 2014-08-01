@@ -98,7 +98,7 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 				// We will have collected the last of the http Request finally
 				// And now we're ready to intercept it and do proxy-type-things
 				response = (isServedLocally()) ?
-						onStaticContentRequestIntercepted().orNull() : onRequestIntercepted().orNull();
+						onServeLocalRequestIntercepted().orNull() : onRequestIntercepted().orNull();
 			}
 
 			return response;
@@ -215,23 +215,26 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		return new DefaultFullHttpResponse(HTTP_1_1, INTERNAL_SERVER_ERROR);
 	}
 
-	// Static content methods
+	// Mapping to Local methods
+	//	To be able to map a request URI to specific local resource
+	//  URL_SERVE_LOCAL : if this path/directory is in the request uri
+	//	PATH_TO_SERVE_LOCAL : then map it to this directory
 
 	private boolean isServedLocally() {
 		String reqpath = FilenameUtils.getPath(request.getUri().toString());
 		if (reqpath.contains(URL_SERVE_LOCAL)) {
-			System.out.println("Requested from gwt-desktop/. Serving from local.");
+			LOG.warning("Request matches URL_SERVE_LOCAL. Serving from local.");
 		}
 		return reqpath.contains(URL_SERVE_LOCAL);
 	}
 
-	private Optional<? extends FullHttpResponse> onStaticContentRequestIntercepted() throws IOException {
+	private Optional<? extends FullHttpResponse> onServeLocalRequestIntercepted() throws IOException {
 		String localpre = PATH_TO_SERVE_LOCAL;
-		String staticpath = getRelativeStaticResourcePath();
-		File f = new File(localpre + staticpath);
+		String localpost = getRelativeLocalResourcePath();
+		File f = new File(localpre + localpost);
 		if (f.exists()) {
-			System.out.println("Retrieving static resource: " + (f.toString()) + "...");
-			FullHttpResponse response = getStaticContentResponse(f);
+			LOG.warning("Local resource found. Retrieving from: " + (f.toString()) + "...");
+			FullHttpResponse response = getLocalResponse(f);
 			setViaHeader(response);
 			return Optional.of(response);
 		} else {
@@ -240,7 +243,7 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		}
 	}
 
-	private FullHttpResponse getStaticContentResponse(File f) throws IOException {
+	private FullHttpResponse getLocalResponse(File f) throws IOException {
 		byte [] fbytes = ByteStreams.toByteArray(new FileInputStream(f.getAbsoluteFile()));
 		byte [] fstream = (request.getHeader("Accept-Encoding").contains("gzip")) ?
 				new GzipEncoder().encode(fbytes) : new NoOpEncoder().encode(fbytes);
@@ -255,7 +258,7 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		return response;
 	}
 
-	// This will have to be improved. Fast and patchy.
+	//TODO: Make matching more robust.
 	private static String getMimeType(File f) {
 		String type = "";
 		String ext = FilenameUtils.getExtension(f.getName());
@@ -270,7 +273,7 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		return type;
 	}
 
-	private String getRelativeStaticResourcePath() {
+	private String getRelativeLocalResourcePath() {
 		String reqpath = request.getUri().toString();
 		return reqpath.substring(reqpath.lastIndexOf(URL_SERVE_LOCAL) + URL_SERVE_LOCAL.length());
 	}
