@@ -34,15 +34,19 @@ import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Map;
 import java.util.logging.Logger;
 
+import org.apache.commons.io.FilenameUtils;
 import org.littleshoot.proxy.HttpFiltersAdapter;
 import org.littleshoot.proxy.impl.ProxyUtils;
 
 import co.freeside.betamax.encoding.DeflateEncoder;
 import co.freeside.betamax.encoding.GzipEncoder;
+import co.freeside.betamax.encoding.NoOpEncoder;
 import co.freeside.betamax.handler.NonWritableTapeException;
 import co.freeside.betamax.message.Response;
 import co.freeside.betamax.proxy.netty.NettyRequestAdapter;
@@ -54,6 +58,9 @@ import com.google.common.base.Splitter;
 import com.google.common.io.ByteStreams;
 
 public class BetamaxFilters extends HttpFiltersAdapter {
+
+	private final String URL_SERVE_LOCAL = "gwt-desktop";
+	private final String PATH_TO_SERVE_LOCAL = "/Users/james.park/Documents/Workday/trunk/gwt-shared/target/gwt-gen";
 
 	private NettyRequestAdapter request;
 	private NettyResponseAdapter upstreamResponse;
@@ -90,7 +97,8 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 			if (ProxyUtils.isLastChunk(httpObject)) {
 				// We will have collected the last of the http Request finally
 				// And now we're ready to intercept it and do proxy-type-things
-				response = onRequestIntercepted().orNull();
+				response = (isServedLocally()) ?
+						onStaticContentRequestIntercepted().orNull() : onRequestIntercepted().orNull();
 			}
 
 			return response;
@@ -114,11 +122,11 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 
 	@Override
 	public HttpObject responsePre(HttpObject httpObject) {
-		
+
 		if (httpObject instanceof HttpResponse) {
 			upstreamResponse = NettyResponseAdapter.wrap(httpObject);
 		}
- 
+
 		if (httpObject instanceof HttpContent) {
 			try {
 				upstreamResponse.append((HttpContent) httpObject);
@@ -129,7 +137,7 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		}
 
 		if (ProxyUtils.isLastChunk(httpObject)) {
-			if (tape.isWritable()) {
+			if (!isServedLocally() && tape.isWritable()) {
 				LOG.info(String.format("Recording to tape %s", tape.getName()));
 				tape.record(request, upstreamResponse);
 			} else {
@@ -180,20 +188,20 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		}
 		return response;
 	}
-	
+
 	private ByteBuf getEncodedContent(Response recordedResponse) throws IOException {
-        byte[] stream;
-        String encodingHeader = recordedResponse.getEncoding();
-        if ("gzip".equals(encodingHeader)) {
-            stream = new GzipEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
-        } else if ("deflate".equals(encodingHeader)) {
-            stream = new DeflateEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
-        } else {
-            stream = ByteStreams.toByteArray(recordedResponse.getBodyAsBinary());
-        }
-        return wrappedBuffer(stream);
-    }
-	
+		byte[] stream;
+		String encodingHeader = recordedResponse.getEncoding();
+		if ("gzip".equals(encodingHeader)) {
+			stream = new GzipEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
+		} else if ("deflate".equals(encodingHeader)) {
+			stream = new DeflateEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
+		} else {
+			stream = ByteStreams.toByteArray(recordedResponse.getBodyAsBinary());
+		}
+		return wrappedBuffer(stream);
+	}
+
 	private HttpHeaders setViaHeader(HttpMessage httpMessage) {
 		return httpMessage.headers().set(VIA, VIA_HEADER);
 	}
@@ -207,4 +215,63 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		return new DefaultFullHttpResponse(HTTP_1_1, INTERNAL_SERVER_ERROR);
 	}
 
+	// Static content methods
+
+	private boolean isServedLocally() {
+		String reqpath = FilenameUtils.getPath(request.getUri().toString());
+		if (reqpath.contains(URL_SERVE_LOCAL)) {
+			System.out.println("Requested from gwt-desktop/. Serving from local.");
+		}
+		return reqpath.contains(URL_SERVE_LOCAL);
+	}
+
+	private Optional<? extends FullHttpResponse> onStaticContentRequestIntercepted() throws IOException {
+		String localpre = PATH_TO_SERVE_LOCAL;
+		String staticpath = getRelativeStaticResourcePath();
+		File f = new File(localpre + staticpath);
+		if (f.exists()) {
+			System.out.println("Retrieving static resource: " + (f.toString()) + "...");
+			FullHttpResponse response = getStaticContentResponse(f);
+			setViaHeader(response);
+			return Optional.of(response);
+		} else {
+			LOG.warning(String.format("no file found for %s", f.getAbsoluteFile())); // file not found
+			return Optional.absent(); // retrieve fresh response from target
+		}
+	}
+
+	private FullHttpResponse getStaticContentResponse(File f) throws IOException {
+		byte [] fbytes = ByteStreams.toByteArray(new FileInputStream(f.getAbsoluteFile()));
+		byte [] fstream = (request.getHeader("Accept-Encoding").contains("gzip")) ?
+				new GzipEncoder().encode(fbytes) : new NoOpEncoder().encode(fbytes);
+		ByteBuf content = wrappedBuffer(fstream);
+		HttpResponseStatus status = HttpResponseStatus.valueOf(200);
+		FullHttpResponse response = new DefaultFullHttpResponse(HTTP_1_1, status, content);
+		
+		response.headers().set("Content-Type", getMimeType(f));
+		if (request.getHeader("Accept-Encoding").contains("gzip")) {
+			response.headers().set("Content-Encoding", "gzip");
+		}
+		return response;
+	}
+
+	// This will have to be improved. Fast and patchy.
+	private static String getMimeType(File f) {
+		String type = "";
+		String ext = FilenameUtils.getExtension(f.getName());
+		switch (ext) {
+			case "js" : type = "application/javascript"; break;
+			case "css" : type = "text/css"; break;
+			case "png" : type = "image/png"; break;
+			case "gif" : type = "image/gif"; break;
+			case "html"	: type = "text/html"; break;
+			default: type = "text/plain"; break;
+		}
+		return type;
+	}
+
+	private String getRelativeStaticResourcePath() {
+		String reqpath = request.getUri().toString();
+		return reqpath.substring(reqpath.lastIndexOf(URL_SERVE_LOCAL) + URL_SERVE_LOCAL.length());
+	}
 }
