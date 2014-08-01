@@ -16,158 +16,174 @@
 
 package co.freeside.betamax.proxy;
 
-import java.io.IOException;
-import java.util.Map;
-import java.util.logging.Logger;
-import co.freeside.betamax.encoding.*;
-import co.freeside.betamax.handler.NonWritableTapeException;
-import co.freeside.betamax.message.Response;
-import co.freeside.betamax.proxy.netty.*;
-import co.freeside.betamax.tape.Tape;
-import com.google.common.base.*;
-import com.google.common.io.ByteStreams;
-import io.netty.buffer.ByteBuf;
-import io.netty.handler.codec.http.*;
-import org.littleshoot.proxy.HttpFiltersAdapter;
-import org.littleshoot.proxy.impl.ProxyUtils;
-
-import static co.freeside.betamax.Headers.*;
+import static co.freeside.betamax.Headers.VIA_HEADER;
+import static co.freeside.betamax.Headers.X_BETAMAX;
 import static io.netty.buffer.Unpooled.wrappedBuffer;
-import static io.netty.handler.codec.http.HttpHeaders.Names.*;
+import static io.netty.handler.codec.http.HttpHeaders.Names.VIA;
 import static io.netty.handler.codec.http.HttpResponseStatus.INTERNAL_SERVER_ERROR;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static java.util.logging.Level.SEVERE;
+import io.netty.buffer.ByteBuf;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMessage;
+import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.logging.Logger;
+
+import org.littleshoot.proxy.HttpFiltersAdapter;
+import org.littleshoot.proxy.impl.ProxyUtils;
+
+import co.freeside.betamax.encoding.DeflateEncoder;
+import co.freeside.betamax.encoding.GzipEncoder;
+import co.freeside.betamax.handler.NonWritableTapeException;
+import co.freeside.betamax.message.Response;
+import co.freeside.betamax.proxy.netty.NettyRequestAdapter;
+import co.freeside.betamax.proxy.netty.NettyResponseAdapter;
+import co.freeside.betamax.tape.Tape;
+
+import com.google.common.base.Optional;
+import com.google.common.base.Splitter;
+import com.google.common.io.ByteStreams;
 
 public class BetamaxFilters extends HttpFiltersAdapter {
 
-    private NettyRequestAdapter request;
-    private NettyResponseAdapter upstreamResponse;
-    private final Tape tape;
+	private NettyRequestAdapter request;
+	private NettyResponseAdapter upstreamResponse;
+	private final Tape tape;
 
-    private static final Logger LOG = Logger.getLogger(BetamaxFilters.class.getName());
+	private static final Logger LOG = Logger.getLogger(BetamaxFilters.class.getName());
 
-    public BetamaxFilters(HttpRequest originalRequest, Tape tape) {
-        super(originalRequest);
-        request = NettyRequestAdapter.wrap(originalRequest);
-        this.tape = tape;
-    }
+	public BetamaxFilters(HttpRequest originalRequest, Tape tape) {
+		super(originalRequest);
+		request = NettyRequestAdapter.wrap(originalRequest);
+		this.tape = tape;	
+	}
 
-    @Override
-    public HttpResponse requestPre(HttpObject httpObject) {
-        try {
-            HttpResponse response = null;
-            if (httpObject instanceof HttpRequest) {
-                //TODO: I believe this is where the CONNECT needs to be caught...
-                // This would require changing the predicate to include all things
-                // As well, an appropriate response that the connect succeeded would have to be returned
-                // But only if the server we are trying to connect to actually has an entry in the tape
-                // It's something of a race condition with the SSL stuff. Because I don't believe we get a path
-                // When we have the connect go through. Could we send the connect later if we didn't send it now?
-                request.copyHeaders((HttpMessage) httpObject);
-            }
+	@Override
+	public HttpResponse requestPre(HttpObject httpObject) {
+		try {
+			HttpResponse response = null;
+			if (httpObject instanceof HttpRequest) {
+				//TODO: I believe this is where the CONNECT needs to be caught...
+				// This would require changing the predicate to include all things
+				// As well, an appropriate response that the connect succeeded would have to be returned
+				// But only if the server we are trying to connect to actually has an entry in the tape
+				// It's something of a race condition with the SSL stuff. Because I don't believe we get a path
+				// When we have the connect go through. Could we send the connect later if we didn't send it now?
+				request.copyHeaders((HttpMessage) httpObject);
+			}
 
-            // If we're getting content stick it in there.
-            if (httpObject instanceof HttpContent) {
-                request.append((HttpContent) httpObject);
-            }
+			// If we're getting content stick it in there.
+			if (httpObject instanceof HttpContent) {
+				request.append((HttpContent) httpObject);
+			}
 
-            // If it's the last one, we want to take further steps, like checking to see if we've recorded on it!
-            if (ProxyUtils.isLastChunk(httpObject)) {
-                // We will have collected the last of the http Request finally
-                // And now we're ready to intercept it and do proxy-type-things
-                response = onRequestIntercepted().orNull();
-            }
+			// If it's the last one, we want to take further steps, like checking to see if we've recorded on it!
+			if (ProxyUtils.isLastChunk(httpObject)) {
+				// We will have collected the last of the http Request finally
+				// And now we're ready to intercept it and do proxy-type-things
+				response = onRequestIntercepted().orNull();
+			}
 
-            return response;
-        } catch (IOException e) {
-            return createErrorResponse(e);
-        }
-    }
+			return response;
+		} catch (IOException e) {
+			return createErrorResponse(e);
+		}
+	}
 
-    @Override
-    public HttpResponse requestPost(HttpObject httpObject) {
-        if (httpObject instanceof HttpRequest) {
-            setViaHeader((HttpMessage) httpObject);
-        }
+	@Override
+	public HttpResponse requestPost(HttpObject httpObject) {
+		if (httpObject instanceof HttpRequest) {
+			setViaHeader((HttpMessage) httpObject);
+		}
 
-        if(httpObject instanceof HttpResponse) {
-            return (HttpResponse) httpObject;
-        } else {
-            return null;
-        }
-    }
+		if(httpObject instanceof HttpResponse) {
+			return (HttpResponse) httpObject;
+		} else {
+			return null;
+		}
+	}
 
-    @Override
-    public HttpObject responsePre(HttpObject httpObject) {
-        if (httpObject instanceof HttpResponse) {
-            upstreamResponse = NettyResponseAdapter.wrap(httpObject);
-        }
+	@Override
+	public HttpObject responsePre(HttpObject httpObject) {
+		
+		if (httpObject instanceof HttpResponse) {
+			upstreamResponse = NettyResponseAdapter.wrap(httpObject);
+		}
+ 
+		if (httpObject instanceof HttpContent) {
+			try {
+				upstreamResponse.append((HttpContent) httpObject);
+			} catch (IOException e) {
+				// TODO: handle in some way
+				LOG.log(SEVERE, "Error appending content", e);
+			}
+		}
 
-        if (httpObject instanceof HttpContent) {
-            try {
-                upstreamResponse.append((HttpContent) httpObject);
-            } catch (IOException e) {
-                // TODO: handle in some way
-                LOG.log(SEVERE, "Error appending content", e);
-            }
-        }
+		if (ProxyUtils.isLastChunk(httpObject)) {
+			if (tape.isWritable()) {
+				LOG.info(String.format("Recording to tape %s", tape.getName()));
+				tape.record(request, upstreamResponse);
+			} else {
+				throw new NonWritableTapeException();
+			}
+		}
 
-        if (ProxyUtils.isLastChunk(httpObject)) {
-            if (tape.isWritable()) {
-                LOG.info(String.format("Recording to tape %s", tape.getName()));
-                tape.record(request, upstreamResponse);
-            } else {
-                throw new NonWritableTapeException();
-            }
-        }
+		return httpObject;
+	}
 
-        return httpObject;
-    }
+	@Override
+	public HttpObject responsePost(HttpObject httpObject) {
+		if (httpObject instanceof HttpResponse) {
+			setBetamaxHeader((HttpResponse) httpObject, "REC");
+			setViaHeader((HttpMessage) httpObject);
+		}
 
-    @Override
-    public HttpObject responsePost(HttpObject httpObject) {
-        if (httpObject instanceof HttpResponse) {
-            setBetamaxHeader((HttpResponse) httpObject, "REC");
-            setViaHeader((HttpMessage) httpObject);
-        }
+		return httpObject;
+	}
 
-        return httpObject;
-    }
+	private Optional<? extends FullHttpResponse> onRequestIntercepted() throws IOException {
+		if (tape == null) {
+			return Optional.of(new DefaultFullHttpResponse(HTTP_1_1, new HttpResponseStatus(403, "No tape")));
+		} else if (tape.isReadable() && tape.seek(request)) {
+			LOG.warning(String.format("Playing back " + request.getUri() + " from tape %s", tape.getName()));
+			Response recordedResponse = tape.play(request);
+			FullHttpResponse response = playRecordedResponse(recordedResponse);
+			setViaHeader(response);
+			setBetamaxHeader(response, "PLAY");
+			return Optional.of(response);
+		} else {	
+			LOG.warning(String.format("no matching request found on %s", tape.getName()));
+			return Optional.absent();
+		}
+	}
 
-    private Optional<? extends FullHttpResponse> onRequestIntercepted() throws IOException {
-        if (tape == null) {
-            return Optional.of(new DefaultFullHttpResponse(HTTP_1_1, new HttpResponseStatus(403, "No tape")));
-        } else if (tape.isReadable() && tape.seek(request)) {
-            LOG.warning(String.format("Playing back from tape %s", tape.getName()));
-            Response recordedResponse = tape.play(request);
-            FullHttpResponse response = playRecordedResponse(recordedResponse);
-            setViaHeader(response);
-            setBetamaxHeader(response, "PLAY");
-            return Optional.of(response);
-        } else {
-            LOG.warning(String.format("no matching request found on %s", tape.getName()));
-            return Optional.absent();
-        }
-    }
-
-    private DefaultFullHttpResponse playRecordedResponse(Response recordedResponse) throws IOException {
-        DefaultFullHttpResponse response;
-        HttpResponseStatus status = HttpResponseStatus.valueOf(recordedResponse.getStatus());
-        if (recordedResponse.hasBody()) {
-            ByteBuf content = getEncodedContent(recordedResponse);
-            response = new DefaultFullHttpResponse(HTTP_1_1, status, content);
-        } else {
-            response = new DefaultFullHttpResponse(HTTP_1_1, status);
-        }
-        for (Map.Entry<String, String> header : recordedResponse.getHeaders().entrySet()) {
-            response.headers().set(header.getKey(), Splitter.onPattern(",\\s*").split(header.getValue()));
-        }
-        return response;
-    }
-
-    private ByteBuf getEncodedContent(Response recordedResponse) throws IOException {
+	private DefaultFullHttpResponse playRecordedResponse(Response recordedResponse) throws IOException {
+		DefaultFullHttpResponse response;
+		HttpResponseStatus status = HttpResponseStatus.valueOf(recordedResponse.getStatus());
+		if (recordedResponse.hasBody()) {
+			ByteBuf content = getEncodedContent(recordedResponse);
+			response = new DefaultFullHttpResponse(HTTP_1_1, status, content);
+		} else {
+			response = new DefaultFullHttpResponse(HTTP_1_1, status);
+		}
+		for (Map.Entry<String, String> header : recordedResponse.getHeaders().entrySet()) {
+			response.headers().set(header.getKey(), Splitter.onPattern(",\\s*").split(header.getValue()));
+		}
+		return response;
+	}
+	
+	private ByteBuf getEncodedContent(Response recordedResponse) throws IOException {
         byte[] stream;
-        String encodingHeader = recordedResponse.getHeader(CONTENT_ENCODING);
+        String encodingHeader = recordedResponse.getEncoding();
         if ("gzip".equals(encodingHeader)) {
             stream = new GzipEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
         } else if ("deflate".equals(encodingHeader)) {
@@ -177,18 +193,18 @@ public class BetamaxFilters extends HttpFiltersAdapter {
         }
         return wrappedBuffer(stream);
     }
+	
+	private HttpHeaders setViaHeader(HttpMessage httpMessage) {
+		return httpMessage.headers().set(VIA, VIA_HEADER);
+	}
 
-    private HttpHeaders setViaHeader(HttpMessage httpMessage) {
-        return httpMessage.headers().set(VIA, VIA_HEADER);
-    }
+	private HttpHeaders setBetamaxHeader(HttpResponse response, String value) {
+		return response.headers().add(X_BETAMAX, value);
+	}
 
-    private HttpHeaders setBetamaxHeader(HttpResponse response, String value) {
-        return response.headers().add(X_BETAMAX, value);
-    }
-
-    private HttpResponse createErrorResponse(Throwable e) {
-        // TODO: more detail
-        return new DefaultFullHttpResponse(HTTP_1_1, INTERNAL_SERVER_ERROR);
-    }
+	private HttpResponse createErrorResponse(Throwable e) {
+		// TODO: more detail
+		return new DefaultFullHttpResponse(HTTP_1_1, INTERNAL_SERVER_ERROR);
+	}
 
 }

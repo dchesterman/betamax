@@ -16,15 +16,28 @@
 
 package co.freeside.betamax.message.tape;
 
-import java.io.*;
-import java.util.LinkedHashMap;
-import co.freeside.betamax.encoding.*;
-import co.freeside.betamax.message.*;
-import com.google.common.io.ByteStreams;
 import static com.google.common.net.HttpHeaders.CONTENT_ENCODING;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.UnsupportedEncodingException;
+import java.util.LinkedHashMap;
+
+import co.freeside.betamax.encoding.AbstractEncoder;
+import co.freeside.betamax.encoding.DeflateEncoder;
+import co.freeside.betamax.encoding.GzipEncoder;
+import co.freeside.betamax.encoding.NoOpEncoder;
+import co.freeside.betamax.message.AbstractMessage;
+import co.freeside.betamax.message.Message;
+
+import com.google.common.io.ByteStreams;
+
 public abstract class RecordedMessage extends AbstractMessage implements Message {
-    public final void addHeader(final String name, String value) {
+    @Override
+	public final void addHeader(final String name, String value) {
         if (headers.get(name) != null) {
             headers.put(name, headers.get(name) + ", " + value);
         } else {
@@ -32,7 +45,8 @@ public abstract class RecordedMessage extends AbstractMessage implements Message
         }
     }
 
-    public final boolean hasBody() {
+    @Override
+	public final boolean hasBody() {
         return body != null;
     }
 
@@ -48,7 +62,8 @@ public abstract class RecordedMessage extends AbstractMessage implements Message
         return new StringReader(string);
     }
 
-    protected final InputStream getBodyAsStream() throws UnsupportedEncodingException {
+    @Override
+	protected final InputStream getBodyAsStream() throws UnsupportedEncodingException {
         byte[] bytes;
         if (hasBody()) {
             bytes = body instanceof String ? ((String) body).getBytes(getCharset()) : (byte[]) body;
@@ -73,7 +88,8 @@ public abstract class RecordedMessage extends AbstractMessage implements Message
         return new NoOpEncoder();
     }
 
-    public LinkedHashMap<String, String> getHeaders() {
+    @Override
+	public LinkedHashMap<String, String> getHeaders() {
         return headers;
     }
 
