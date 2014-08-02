@@ -277,4 +277,15 @@ public class BetamaxFilters extends HttpFiltersAdapter {
 		String reqpath = request.getUri().toString();
 		return reqpath.substring(reqpath.lastIndexOf(URL_SERVE_LOCAL) + URL_SERVE_LOCAL.length());
 	}
+	
+	// Flow ID methods
+	//	Workday specific
+	
+	private boolean isFlow() {
+		return true;
+	}
+	
+	private String parseFlowID() {
+		return "";
+	}
 }
