@@ -16,179 +16,262 @@
 
 package co.freeside.betamax.proxy;
 
-import java.io.IOException;
-import java.util.Map;
-import java.util.logging.Logger;
-import co.freeside.betamax.encoding.*;
-import co.freeside.betamax.handler.NonWritableTapeException;
-import co.freeside.betamax.message.Response;
-import co.freeside.betamax.proxy.netty.*;
-import co.freeside.betamax.tape.Tape;
-import com.google.common.base.*;
-import com.google.common.io.ByteStreams;
-import io.netty.buffer.ByteBuf;
-import io.netty.handler.codec.http.*;
-import org.littleshoot.proxy.HttpFiltersAdapter;
-import org.littleshoot.proxy.impl.ProxyUtils;
-
-import static co.freeside.betamax.Headers.*;
+import static co.freeside.betamax.Headers.VIA_HEADER;
+import static co.freeside.betamax.Headers.X_BETAMAX;
 import static io.netty.buffer.Unpooled.wrappedBuffer;
-import static io.netty.handler.codec.http.HttpHeaders.Names.*;
+import static io.netty.handler.codec.http.HttpHeaders.Names.VIA;
 import static io.netty.handler.codec.http.HttpResponseStatus.INTERNAL_SERVER_ERROR;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static java.util.logging.Level.SEVERE;
+import io.netty.buffer.ByteBuf;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMessage;
+import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Map;
+import java.util.logging.Logger;
+
+import org.apache.commons.io.FilenameUtils;
+import org.littleshoot.proxy.HttpFiltersAdapter;
+import org.littleshoot.proxy.impl.ProxyUtils;
+
+import co.freeside.betamax.encoding.DeflateEncoder;
+import co.freeside.betamax.encoding.GzipEncoder;
+import co.freeside.betamax.encoding.NoOpEncoder;
+import co.freeside.betamax.handler.NonWritableTapeException;
+import co.freeside.betamax.message.Response;
+import co.freeside.betamax.proxy.netty.NettyRequestAdapter;
+import co.freeside.betamax.proxy.netty.NettyResponseAdapter;
+import co.freeside.betamax.tape.Tape;
+
+import com.google.common.base.Optional;
+import com.google.common.base.Splitter;
+import com.google.common.io.ByteStreams;
 
 public class BetamaxFilters extends HttpFiltersAdapter {
 
-    private NettyRequestAdapter request;
-    private NettyResponseAdapter upstreamResponse;
-    private final Tape tape;
+	private final String URL_SERVE_LOCAL = "gwt-desktop";
+	private final String PATH_TO_SERVE_LOCAL = "/Users/james.park/Documents/Workday/trunk/gwt-shared/target/gwt-gen";
 
-    private static final Logger LOG = Logger.getLogger(BetamaxFilters.class.getName());
+	private NettyRequestAdapter request;
+	private NettyResponseAdapter upstreamResponse;
+	private final Tape tape;
 
-    public BetamaxFilters(HttpRequest originalRequest, Tape tape) {
-        super(originalRequest);
-        request = NettyRequestAdapter.wrap(originalRequest);
-        this.tape = tape;
-    }
+	private static final Logger LOG = Logger.getLogger(BetamaxFilters.class.getName());
 
-    @Override
-    public HttpResponse requestPre(HttpObject httpObject) {
-        try {
-            HttpResponse response = null;
-            if (httpObject instanceof HttpRequest) {
-                //TODO: I believe this is where the CONNECT needs to be caught...
-                // This would require changing the predicate to include all things
-                // As well, an appropriate response that the connect succeeded would have to be returned
-                // But only if the server we are trying to connect to actually has an entry in the tape
-                // It's something of a race condition with the SSL stuff. Because I don't believe we get a path
-                // When we have the connect go through. Could we send the connect later if we didn't send it now?
-                request.copyHeaders((HttpMessage) httpObject);
-            }
+	public BetamaxFilters(HttpRequest originalRequest, Tape tape) {
+		super(originalRequest);
+		request = NettyRequestAdapter.wrap(originalRequest);
+		this.tape = tape;	
+	}
 
-            // If we're getting content stick it in there.
-            if (httpObject instanceof HttpContent) {
-                request.append((HttpContent) httpObject);
-            }
+	@Override
+	public HttpResponse requestPre(HttpObject httpObject) {
+		try {
+			HttpResponse response = null;
+			if (httpObject instanceof HttpRequest) {
+				//TODO: I believe this is where the CONNECT needs to be caught...
+				// This would require changing the predicate to include all things
+				// As well, an appropriate response that the connect succeeded would have to be returned
+				// But only if the server we are trying to connect to actually has an entry in the tape
+				// It's something of a race condition with the SSL stuff. Because I don't believe we get a path
+				// When we have the connect go through. Could we send the connect later if we didn't send it now?
+				request.copyHeaders((HttpMessage) httpObject);
+			}
 
-            // If it's the last one, we want to take further steps, like checking to see if we've recorded on it!
-            if (ProxyUtils.isLastChunk(httpObject)) {
-                // We will have collected the last of the http Request finally
-                // And now we're ready to intercept it and do proxy-type-things
-                response = onRequestIntercepted().orNull();
-            }
+			// If we're getting content stick it in there.
+			if (httpObject instanceof HttpContent) {
+				request.append((HttpContent) httpObject);
+			}
 
-            return response;
-        } catch (IOException e) {
-            return createErrorResponse(e);
-        }
-    }
+			// If it's the last one, we want to take further steps, like checking to see if we've recorded on it!
+			if (ProxyUtils.isLastChunk(httpObject)) {
+				// We will have collected the last of the http Request finally
+				// And now we're ready to intercept it and do proxy-type-things
+				response = (isServedLocally()) ?
+						onStaticContentRequestIntercepted().orNull() : onRequestIntercepted().orNull();
+			}
 
-    @Override
-    public HttpResponse requestPost(HttpObject httpObject) {
-        if (httpObject instanceof HttpRequest) {
-            setViaHeader((HttpMessage) httpObject);
-        }
+			return response;
+		} catch (IOException e) {
+			return createErrorResponse(e);
+		}
+	}
 
-        if(httpObject instanceof HttpResponse) {
-            return (HttpResponse) httpObject;
-        } else {
-            return null;
-        }
-    }
+	@Override
+	public HttpResponse requestPost(HttpObject httpObject) {
+		if (httpObject instanceof HttpRequest) {
+			setViaHeader((HttpMessage) httpObject);
+		}
 
-    @Override
-    public HttpObject responsePre(HttpObject httpObject) {
-        if (httpObject instanceof HttpResponse) {
-            upstreamResponse = NettyResponseAdapter.wrap(httpObject);
-        }
+		if(httpObject instanceof HttpResponse) {
+			return (HttpResponse) httpObject;
+		} else {
+			return null;
+		}
+	}
 
-        if (httpObject instanceof HttpContent) {
-            try {
-                upstreamResponse.append((HttpContent) httpObject);
-            } catch (IOException e) {
-                // TODO: handle in some way
-                LOG.log(SEVERE, "Error appending content", e);
-            }
-        }
+	@Override
+	public HttpObject responsePre(HttpObject httpObject) {
 
-        if (ProxyUtils.isLastChunk(httpObject)) {
-            if (tape.isWritable()) {
-                LOG.info(String.format("Recording to tape %s", tape.getName()));
-                tape.record(request, upstreamResponse);
-            } else {
-                throw new NonWritableTapeException();
-            }
-        }
+		if (httpObject instanceof HttpResponse) {
+			upstreamResponse = NettyResponseAdapter.wrap(httpObject);
+		}
 
-        return httpObject;
-    }
+		if (httpObject instanceof HttpContent) {
+			try {
+				upstreamResponse.append((HttpContent) httpObject);
+			} catch (IOException e) {
+				// TODO: handle in some way
+				LOG.log(SEVERE, "Error appending content", e);
+			}
+		}
 
-    @Override
-    public HttpObject responsePost(HttpObject httpObject) {
-        if (httpObject instanceof HttpResponse) {
-            setBetamaxHeader((HttpResponse) httpObject, "REC");
-            setViaHeader((HttpMessage) httpObject);
-        }
+		if (ProxyUtils.isLastChunk(httpObject)) {
+			if (!isServedLocally() && tape.isWritable()) {
+				LOG.info(String.format("Recording to tape %s", tape.getName()));
+				tape.record(request, upstreamResponse);
+			} else {
+				throw new NonWritableTapeException();
+			}
+		}
 
-        return httpObject;
-    }
+		return httpObject;
+	}
 
-    private Optional<? extends FullHttpResponse> onRequestIntercepted() throws IOException {
-        if (tape == null) {
-            return Optional.of(new DefaultFullHttpResponse(HTTP_1_1, new HttpResponseStatus(403, "No tape")));
-        } else if (tape.isReadable() && tape.seek(request)) {
-            LOG.warning(String.format("Playing back from tape %s", tape.getName()));
-            Response recordedResponse = tape.play(request);
-            FullHttpResponse response = playRecordedResponse(recordedResponse);
-            setViaHeader(response);
-            setBetamaxHeader(response, "PLAY");
-            return Optional.of(response);
-        } else {
-            LOG.warning(String.format("no matching request found on %s", tape.getName()));
-            return Optional.absent();
-        }
-    }
+	@Override
+	public HttpObject responsePost(HttpObject httpObject) {
+		if (httpObject instanceof HttpResponse) {
+			setBetamaxHeader((HttpResponse) httpObject, "REC");
+			setViaHeader((HttpMessage) httpObject);
+		}
 
-    private DefaultFullHttpResponse playRecordedResponse(Response recordedResponse) throws IOException {
-        DefaultFullHttpResponse response;
-        HttpResponseStatus status = HttpResponseStatus.valueOf(recordedResponse.getStatus());
-        if (recordedResponse.hasBody()) {
-            ByteBuf content = getEncodedContent(recordedResponse);
-            response = new DefaultFullHttpResponse(HTTP_1_1, status, content);
-        } else {
-            response = new DefaultFullHttpResponse(HTTP_1_1, status);
-        }
-        for (Map.Entry<String, String> header : recordedResponse.getHeaders().entrySet()) {
-            response.headers().set(header.getKey(), Splitter.onPattern(",\\s*").split(header.getValue()));
-        }
-        return response;
-    }
+		return httpObject;
+	}
 
-    private ByteBuf getEncodedContent(Response recordedResponse) throws IOException {
-        byte[] stream;
-        String encodingHeader = recordedResponse.getHeader(CONTENT_ENCODING);
-        if ("gzip".equals(encodingHeader)) {
-            stream = new GzipEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
-        } else if ("deflate".equals(encodingHeader)) {
-            stream = new DeflateEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
-        } else {
-            stream = ByteStreams.toByteArray(recordedResponse.getBodyAsBinary());
-        }
-        return wrappedBuffer(stream);
-    }
+	private Optional<? extends FullHttpResponse> onRequestIntercepted() throws IOException {
+		if (tape == null) {
+			return Optional.of(new DefaultFullHttpResponse(HTTP_1_1, new HttpResponseStatus(403, "No tape")));
+		} else if (tape.isReadable() && tape.seek(request)) {
+			LOG.warning(String.format("Playing back " + request.getUri() + " from tape %s", tape.getName()));
+			Response recordedResponse = tape.play(request);
+			FullHttpResponse response = playRecordedResponse(recordedResponse);
+			setViaHeader(response);
+			setBetamaxHeader(response, "PLAY");
+			return Optional.of(response);
+		} else {	
+			LOG.warning(String.format("no matching request found on %s", tape.getName()));
+			return Optional.absent();
+		}
+	}
 
-    private HttpHeaders setViaHeader(HttpMessage httpMessage) {
-        return httpMessage.headers().set(VIA, VIA_HEADER);
-    }
+	private DefaultFullHttpResponse playRecordedResponse(Response recordedResponse) throws IOException {
+		DefaultFullHttpResponse response;
+		HttpResponseStatus status = HttpResponseStatus.valueOf(recordedResponse.getStatus());
+		if (recordedResponse.hasBody()) {
+			ByteBuf content = getEncodedContent(recordedResponse);
+			response = new DefaultFullHttpResponse(HTTP_1_1, status, content);
+		} else {
+			response = new DefaultFullHttpResponse(HTTP_1_1, status);
+		}
+		for (Map.Entry<String, String> header : recordedResponse.getHeaders().entrySet()) {
+			response.headers().set(header.getKey(), Splitter.onPattern(",\\s*").split(header.getValue()));
+		}
+		return response;
+	}
 
-    private HttpHeaders setBetamaxHeader(HttpResponse response, String value) {
-        return response.headers().add(X_BETAMAX, value);
-    }
+	private ByteBuf getEncodedContent(Response recordedResponse) throws IOException {
+		byte[] stream;
+		String encodingHeader = recordedResponse.getEncoding();
+		if ("gzip".equals(encodingHeader)) {
+			stream = new GzipEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
+		} else if ("deflate".equals(encodingHeader)) {
+			stream = new DeflateEncoder().encode(ByteStreams.toByteArray(recordedResponse.getBodyAsBinary()));
+		} else {
+			stream = ByteStreams.toByteArray(recordedResponse.getBodyAsBinary());
+		}
+		return wrappedBuffer(stream);
+	}
 
-    private HttpResponse createErrorResponse(Throwable e) {
-        // TODO: more detail
-        return new DefaultFullHttpResponse(HTTP_1_1, INTERNAL_SERVER_ERROR);
-    }
+	private HttpHeaders setViaHeader(HttpMessage httpMessage) {
+		return httpMessage.headers().set(VIA, VIA_HEADER);
+	}
 
+	private HttpHeaders setBetamaxHeader(HttpResponse response, String value) {
+		return response.headers().add(X_BETAMAX, value);
+	}
+
+	private HttpResponse createErrorResponse(Throwable e) {
+		// TODO: more detail
+		return new DefaultFullHttpResponse(HTTP_1_1, INTERNAL_SERVER_ERROR);
+	}
+
+	// Static content methods
+
+	private boolean isServedLocally() {
+		String reqpath = FilenameUtils.getPath(request.getUri().toString());
+		if (reqpath.contains(URL_SERVE_LOCAL)) {
+			System.out.println("Requested from gwt-desktop/. Serving from local.");
+		}
+		return reqpath.contains(URL_SERVE_LOCAL);
+	}
+
+	private Optional<? extends FullHttpResponse> onStaticContentRequestIntercepted() throws IOException {
+		String localpre = PATH_TO_SERVE_LOCAL;
+		String staticpath = getRelativeStaticResourcePath();
+		File f = new File(localpre + staticpath);
+		if (f.exists()) {
+			System.out.println("Retrieving static resource: " + (f.toString()) + "...");
+			FullHttpResponse response = getStaticContentResponse(f);
+			setViaHeader(response);
+			return Optional.of(response);
+		} else {
+			LOG.warning(String.format("no file found for %s", f.getAbsoluteFile())); // file not found
+			return Optional.absent(); // retrieve fresh response from target
+		}
+	}
+
+	private FullHttpResponse getStaticContentResponse(File f) throws IOException {
+		byte [] fbytes = ByteStreams.toByteArray(new FileInputStream(f.getAbsoluteFile()));
+		byte [] fstream = (request.getHeader("Accept-Encoding").contains("gzip")) ?
+				new GzipEncoder().encode(fbytes) : new NoOpEncoder().encode(fbytes);
+		ByteBuf content = wrappedBuffer(fstream);
+		HttpResponseStatus status = HttpResponseStatus.valueOf(200);
+		FullHttpResponse response = new DefaultFullHttpResponse(HTTP_1_1, status, content);
+		
+		response.headers().set("Content-Type", getMimeType(f));
+		if (request.getHeader("Accept-Encoding").contains("gzip")) {
+			response.headers().set("Content-Encoding", "gzip");
+		}
+		return response;
+	}
+
+	// This will have to be improved. Fast and patchy.
+	private static String getMimeType(File f) {
+		String type = "";
+		String ext = FilenameUtils.getExtension(f.getName());
+		switch (ext) {
+			case "js" : type = "application/javascript"; break;
+			case "css" : type = "text/css"; break;
+			case "png" : type = "image/png"; break;
+			case "gif" : type = "image/gif"; break;
+			case "html"	: type = "text/html"; break;
+			default: type = "text/plain"; break;
+		}
+		return type;
+	}
+
+	private String getRelativeStaticResourcePath() {
+		String reqpath = request.getUri().toString();
+		return reqpath.substring(reqpath.lastIndexOf(URL_SERVE_LOCAL) + URL_SERVE_LOCAL.length());
+	}
 }
