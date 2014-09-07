@@ -11,6 +11,18 @@ buildscript {
 apply plugin: "artifactory"
 apply from: "gradle/idea/idea.gradle"
 
+subprojects {
+    apply plugin: "eclipse"
+}
+ 
+task eclipse << {
+    subprojects.each { it.eclipse }
+}
+
+task cleanEclipse << {
+    subprojects.each { it.cleanEclipse }
+}
+
 artifactory {
     contextUrl = "http://oss.jfrog.org/"
 }
