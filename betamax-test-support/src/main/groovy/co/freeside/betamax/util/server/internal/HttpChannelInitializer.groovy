@@ -43,7 +43,7 @@ class HttpChannelInitializer extends ChannelInitializer<SocketChannel> {
     }
 
     @Override
-    void initChannel(SocketChannel channel) {
+    void initChannel(SocketChannel channel) throws Exception {
         def pipeline = channel.pipeline()
         pipeline.addLast("decoder", new HttpRequestDecoder())
         pipeline.addLast("aggregator", new HttpObjectAggregator(MAX_CONTENT_LENGTH))
